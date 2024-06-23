@@ -1,2 +1,4 @@
 ﻿.env
 test.ipynb
+*.csv
+*.gzip
