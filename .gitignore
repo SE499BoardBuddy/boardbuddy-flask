@@ -2,3 +2,5 @@
 test.ipynb
 *.csv
 *.gzip
+__pycache__
+example_pdf
