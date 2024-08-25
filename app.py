@@ -17,6 +17,17 @@ import pandas as pd
 
 import random
 
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_google_genai import GoogleGenerativeAI
+from langchain.memory import ConversationBufferWindowMemory
+from langchain.chains import ConversationalRetrievalChain
+from langchain_qdrant import QdrantVectorStore
+
+from build_filter import build_filter_min_age, build_filter_min_players, build_filter_max_players, build_filter_match
+from build_filter import build_filter_min_playtime, build_filter_max_playtime, build_filter_min_year, build_filter_max_year
+from pick_filter import pick_filter_min_age, pick_filter_min_playtime, pick_filter_max_playtime
+from pick_filter import pick_filter_min_players, pick_filter_max_players
+
 load_dotenv(override=True)
 
 # creates Flask object
@@ -32,94 +43,23 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = True
 # creates SQLALCHEMY object
 db = SQLAlchemy(app)
 
-app.es_client = Elasticsearch("https://localhost:9200", basic_auth=("elastic","DEq+yKIoJag7b_ZEJl4W"), ca_certs="~/http_ca.crt")
+app.es_client = Elasticsearch("https://localhost:9200", basic_auth=("elastic", os.environ.get('ELASTIC_KEY')), ca_certs="~/http_ca.crt")
 app.df = pd.read_parquet('bgg_games_info_cleaned.parquet.gzip')
 
-# min_age
-def build_filter_min_age(array, min_age):
-    try:
-        if min_age != None and len(min_age) != 0 and int(min_age) > 0:
-            array.append({ "range": { "age": { "gte": min_age }}})
-        return array
-    except ValueError:
-        return array
+# embedding
+app.embeddings = OllamaEmbeddings(model='nomic-embed-text') 
 
-# min_players
-def build_filter_min_players(array, min_players):
-    try:
-        if min_players != None and len(min_players) != 0:
-            if int(min_players) > 0:
-                array.append({ "range": { "min_players": { "lte": min_players }}})
-            else:
-                array.append({ "range": { "min_players": { "gte": min_players }}})
-        return array
-    except ValueError:
-        return array
+# qdrant
+app.qdrant = QdrantVectorStore.from_existing_collection(
+    embedding=app.embeddings,
+    collection_name="brass_birmingham",
+    url="https://183e03de-cba4-4c31-9a62-be25dc87e60e.europe-west3-0.gcp.cloud.qdrant.io",
+    api_key=os.environ["QDRANT_KEY"],
+)
+app.retriever=app.qdrant.as_retriever()
 
-# max_players
-def build_filter_max_players(array, max_players):
-    try:
-        if max_players != None and len(max_players) != 0 and int(max_players) > 0:
-            array.append({ "range": { "max_players": { "gte": max_players }}})
-        return array
-    except ValueError:
-        return array
-    
-# min_playtime
-def build_filter_min_playtime(array, min_playtime):
-    try:
-        if min_playtime != None and len(min_playtime) != 0:
-            if int(min_playtime) > 0:
-                array.append({ "range": { "min_playtime": { "lte": min_playtime }}})
-            else:
-                array.append({ "range": { "min_playtime": { "gte": min_playtime }}})
-        return array
-    except ValueError:
-        return array
-
-# max_playtime
-def build_filter_max_playtime(array, max_playtime):
-    try:
-        if max_playtime != None and len(max_playtime) != 0 and int(max_playtime) > 0:
-            array.append({ "range": { "max_playtime": { "gte": max_playtime }}})
-        return array
-    except ValueError:
-        return array
-    
-# min_year
-def build_filter_min_year(array, min_year):
-    try:
-        if min_year != None and len(min_year) != 0 and int(min_year) > 0:
-            array.append({ "range": { "year_published": { "gte": min_year }}})
-        return array
-    except ValueError:
-        return array
-    
-# max_year
-def build_filter_max_year(array, max_year):
-    try:
-        if max_year != None and len(max_year) != 0 and int(max_year) > 0:
-            array.append({ "range": { "year_published": { "lte": max_year }}})
-        return array
-    except ValueError:
-        return array
-    
-# bg_designer
-# bg_publisher
-# bg_subdomain
-def build_filter_match(array, bg_designer, bg_publisher, bg_subdomain):
-    if (bg_designer == None or len(bg_designer) == 0)\
-        and (bg_publisher == None or len(bg_publisher) == 0)\
-        and (bg_subdomain == None or len(bg_subdomain) == 0):
-        array.append({ "match_all": {} })
-    else:
-        if bg_designer != None and len(bg_designer) != 0:
-            array.append({ "match": { "boardgame_designer": bg_designer }})
-        if bg_publisher != None and len(bg_publisher) != 0:
-            array.append({ "match": { "boardgame_publisher": bg_publisher }})
-        if bg_subdomain != None and len(bg_subdomain) != 0:
-            array.append({ "match": { "boardgame_subdomain": bg_subdomain }})
-    return array
+# llm
+app.llm = GoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=os.environ["GOOGLE_API_KEY_GEN"])
 
 # Database ORMs
 class User(db.Model):
@@ -131,6 +71,7 @@ class User(db.Model):
     password = db.Column(db.Text(), nullable=False)
     roles = db.Column(db.String(100), nullable=False)
     collections = db.relationship('Collection', backref='user', lazy=True, cascade="all,delete")
+    chats = db.relationship('ChatHistory', backref='user', lazy=True, cascade="all,delete")
 
 class Collection(db.Model):
     __tablename__ = "collection"
@@ -139,7 +80,6 @@ class Collection(db.Model):
     name = db.Column(db.String(100), nullable=False)
     user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=False)
     boardgames = db.relationship('CollectionItem', backref='collection', lazy=True, cascade="all,delete")
-
 
 class CollectionItem(db.Model):
     __tablename__ = "item"
@@ -153,6 +93,23 @@ class CollectionItem(db.Model):
         ),
     )
 
+class ChatHistory(db.Model):
+    __tablename__ = "history"
+    id = db.Column(db.Integer, primary_key = True)
+    public_id = db.Column(db.String(50), unique = True, nullable=False)
+    user_id = db.Column(db.String(50), db.ForeignKey('user.public_id'), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    game = db.Column(db.Integer, nullable=False)
+    chats = db.relationship('ChatMessage', backref='history', lazy=True, cascade="all,delete")
+
+class ChatMessage(db.Model):
+    __tablename__ = "message"
+    id = db.Column(db.Integer, primary_key = True)
+    public_id = db.Column(db.String(50), unique = True, nullable=False)
+    chat_id = db.Column(db.String(50), db.ForeignKey('history.public_id'), nullable=False)
+    is_human = db.Column(db.Boolean, nullable=False)
+    date = db.Column(db.DateTime, nullable=False)
+    message = db.Column(db.Text, nullable=False)
 
 # decorator for verifying the JWT
 def token_required(f):
@@ -744,17 +701,12 @@ def random_pick():
             'min_age': content["_source"]['age']
         })
     
-    if min_age and min_age != 0 and type(min_age) == int:
-        return_list = [item for item in return_list if item["min_age"] <= min_age]
-    if min_playtime and min_playtime != 0 and type(min_playtime) == int:
-        return_list = [item for item in return_list if item["min_playtime"] >= min_playtime]
-    if max_playtime and max_playtime != 0 and type(max_playtime) == int:
-        return_list = [item for item in return_list if item["max_playtime"] <= max_playtime]
-    if min_players and min_players != 0 and type(min_players) == int:
-        return_list = [item for item in return_list if item["min_players"] <= min_players]
-    if max_players and max_players != 0 and type(max_players) == int:
-        return_list = [item for item in return_list if item["max_players"] >= max_players]
-    
+    pick_filter_min_age(return_list, min_age)
+    pick_filter_min_playtime(return_list, min_playtime)
+    pick_filter_max_playtime(return_list, max_playtime)
+    pick_filter_min_players(return_list, min_players)
+    pick_filter_max_players(return_list, max_players)
+
     if len(return_list) != 0:
         response = [random.choice(return_list)]
     else:
@@ -762,49 +714,224 @@ def random_pick():
 
     return jsonify(response)
 
+@app.route('/send_message', methods =['POST'])
+def send_message():
+    # get json variables
+    data = request.json
+    message = data.get('message')
+    user_id = data.get('user_id')
+    chat_id = data.get('chat_id')
+    game = data.get('game')
+
+    # setup llm
+    memory = ConversationBufferWindowMemory(
+        memory_key="chat_history",
+        return_messages=True,
+        k=2
+    )
+    qa = ConversationalRetrievalChain.from_llm(
+        app.llm,
+        retriever=app.retriever,
+        memory=memory
+    )
+
+    # find existing user
+    user = User.query\
+        .filter_by(public_id = user_id)\
+        .first()
+    # try to find existing chat history
+    history = ChatHistory.query\
+        .filter_by(public_id = chat_id)\
+        .filter_by(game = game)\
+        .first()
+
+    if user:
+        # if chat history does not exist, create it
+        if not history:
+            history = ChatHistory(
+                public_id = str(uuid.uuid4()),
+                name = datetime.now(),
+                game = game,
+            )
+            user.chats.append(history)
+            db.session.add(history)
+            db.session.commit()
+        elif history:
+            history_list = get_history(chat_id)
+            input_message = ''
+            output_message = ''
+            for c in history_list:
+                if len(input_message) == 0:
+                    if c['is_human']:
+                        input_message = c['message']
+                        # print(input_message)
+                if len(output_message) == 0:
+                    if not c['is_human']:
+                        output_message = c['message']
+                        # print(output_message)
+                if len(input_message) != 0 and len(output_message) != 0:
+                    memory.save_context({'input': input_message}, {'output': output_message})
+                    input_message = ''
+                    output_message = ''
+
+            # print(memory.load_memory_variables({}))
+        # save user message to database
+        new_user_chat = ChatMessage(
+            public_id = str(uuid.uuid4()),
+            is_human = True,
+            date = datetime.now(),
+            message = message
+        )
+        history.chats.append(new_user_chat)
+
+        # invoke llm
+        result = qa.invoke(message)
+        # save ai message to database
+        new_ai_chat = ChatMessage(
+            public_id = str(uuid.uuid4()),
+            is_human = False,
+            date = datetime.now(),
+            message = result['answer']
+        )
+        history.chats.append(new_ai_chat)
+
+        # commit to database
+        db.session.add_all([new_user_chat, new_ai_chat])
+        db.session.commit()
+    return jsonify(result['answer'])
+
+@app.route('/get_history/<chat_id>', methods =['GET'])
+def get_history(chat_id="-1"):
+
+    # try to find existing chat history
+    history = ChatHistory.query\
+        .filter_by(public_id = chat_id)\
+        .first()
+    
+    result = []
+    if history:
+        chats = ChatMessage.query\
+            .filter_by(chat_id = chat_id)\
+            .all()
+        for c in chats:
+            result.append({
+                "date": c.date,
+                "is_human": c.is_human,
+                "message": c.message
+            })
+    
+    return result
+
+@app.route('/get_all_history/<user_id>', methods =['GET'])
+def get_all_history(user_id="-1"):
+
+    # try to find existing chat history
+    user = User.query\
+        .filter_by(public_id = user_id)\
+        .first()
+    
+    result = []
+    if user:
+        history = ChatHistory.query\
+            .filter_by(user_id = user_id)\
+            .all()
+        for h in history:
+            result.append({
+                "name": h.name,
+                "game": h.game,
+                "public_id": h.public_id
+            })
+    
+    return result
+
+@app.route('/delete_history', methods =['POST'])
+def delete_history():
+    # creates dictionary of form data
+    data = request.json
+    public_id = data.get('public_id')
+
+    history = ChatHistory.query\
+        .filter_by(public_id = public_id)\
+        .first()
+    
+    if not history:
+        # returns 401 if user does not exist
+        return make_response(
+            'Could not verify',
+            401,
+            {'WWW-Authenticate' : 'Basic realm ="Chat History does not exist !!"'}
+        )
+
+    db.session.delete(history)
+    db.session.commit()
+    return make_response('delete history')
+
 if __name__ == "__main__":
     # setting debug to True enables hot reload
     # and also provides a debugger shell
     # if you hit an error while running the server
-    with app.app_context():
-        # db.drop_all()
-        db.create_all()
-        # admin = User(
-        #     public_id = str(uuid.uuid4()),
-        #     username = 'admin',
-        #     email = 'admin@admin',
-        #     password = generate_password_hash('admin'),
-        #     roles = 'ROLE_ADMIN'
-        # )
-        # test_collection = Collection(
-        #     name = 'test',
-        #     public_id = str(uuid.uuid4()),
-        # )
-        # sec = Collection(
-        #     name = 'second',
-        #     public_id = str(uuid.uuid4()),
-        # )
-        # thd = Collection(
-        #     name = 'third',
-        #     public_id = str(uuid.uuid4()),
-        # )
-        # admin.collections = [test_collection, sec, thd]
-        # item1 = CollectionItem(
-        #     bg_id = 224517,
-        #     public_id = str(uuid.uuid4()),
-        # )
-        # item2 = CollectionItem(
-        #     bg_id = 161936,
-        #     public_id = str(uuid.uuid4()),
-        # )
-        # item3 = CollectionItem(
-        #     bg_id = 174430,
-        #     public_id = str(uuid.uuid4()),
-        # )
-        # sec.boardgames = [item1, item2]
-        # thd.boardgames = [item3]
-        # # insert user
-        # db.session.add(admin)
-        # db.session.add_all([test_collection, sec, thd, item1, item2, item3])
-        # db.session.commit()
+    # with app.app_context():
+    #     db.drop_all()
+    #     db.create_all()
+    #     admin = User(
+    #         public_id = str(uuid.uuid4()),
+    #         username = 'admin',
+    #         email = 'admin@admin',
+    #         password = generate_password_hash('admin'),
+    #         roles = 'ROLE_ADMIN'
+    #     )
+    #     test_collection = Collection(
+    #         name = 'test',
+    #         public_id = str(uuid.uuid4()),
+    #     )
+    #     sec = Collection(
+    #         name = 'second',
+    #         public_id = str(uuid.uuid4()),
+    #     )
+    #     thd = Collection(
+    #         name = 'third',
+    #         public_id = str(uuid.uuid4()),
+    #     )
+    #     admin.collections = [test_collection, sec, thd]
+    #     item1 = CollectionItem(
+    #         bg_id = 224517,
+    #         public_id = str(uuid.uuid4()),
+    #     )
+    #     item2 = CollectionItem(
+    #         bg_id = 161936,
+    #         public_id = str(uuid.uuid4()),
+    #     )
+    #     item3 = CollectionItem(
+    #         bg_id = 174430,
+    #         public_id = str(uuid.uuid4()),
+    #     )
+    #     sec.boardgames = [item1, item2]
+    #     thd.boardgames = [item3]
+
+    #     test_history = ChatHistory(
+    #         public_id = str(uuid.uuid4()),
+    #         name = "test",
+    #         game = 0,
+    #     )
+    #     admin.chats = [test_history]
+    #     test_chat1 = ChatMessage(
+    #         public_id = str(uuid.uuid4()),
+    #         is_human = True,
+    #         date = datetime.now(),
+    #         message = "first"
+    #     )
+    #     test_chat2 = ChatMessage(
+    #         public_id = str(uuid.uuid4()),
+    #         is_human = False,
+    #         date = datetime.now(),
+    #         message = "second"
+    #     )
+    #     test_history.chats = [test_chat1, test_chat2]
+
+    #     # insert user
+    #     db.session.add(admin)
+    #     db.session.add_all([test_collection, sec, thd, item1, item2, item3])
+    #     db.session.add_all([test_history, test_chat1, test_chat2])
+    #     db.session.commit()
+
     app.run(debug = True)
