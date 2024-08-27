@@ -48,16 +48,8 @@ app.df = pd.read_parquet('bgg_games_info_cleaned.parquet.gzip')
 
 # embedding
 app.embeddings = OllamaEmbeddings(model='nomic-embed-text') 
-
 # qdrant
-app.qdrant = QdrantVectorStore.from_existing_collection(
-    embedding=app.embeddings,
-    collection_name="brass_birmingham",
-    url="https://183e03de-cba4-4c31-9a62-be25dc87e60e.europe-west3-0.gcp.cloud.qdrant.io",
-    api_key=os.environ["QDRANT_KEY"],
-)
-app.retriever=app.qdrant.as_retriever()
-
+app.qdrant_url = "https://183e03de-cba4-4c31-9a62-be25dc87e60e.europe-west3-0.gcp.cloud.qdrant.io"
 # llm
 app.llm = GoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=os.environ["GOOGLE_API_KEY_GEN"])
 
@@ -110,6 +102,14 @@ class ChatMessage(db.Model):
     is_human = db.Column(db.Boolean, nullable=False)
     date = db.Column(db.DateTime, nullable=False)
     message = db.Column(db.Text, nullable=False)
+
+class Rulebook(db.Model):
+    __tablename__ = "rulebook"
+    id = db.Column(db.Integer, primary_key = True)
+    name = db.Column(db.String(50), nullable=False)
+    qdrant = db.Column(db.String(50), nullable=False)
+    image = db.Column(db.Text, nullable=False)
+    link = db.Column(db.Text)
 
 # decorator for verifying the JWT
 def token_required(f):
@@ -723,15 +723,35 @@ def send_message():
     chat_id = data.get('chat_id')
     game = data.get('game')
 
+    new_history = False
+
+    # find existing rulebook
+    rulebook = Rulebook.query\
+        .filter_by(id = game)\
+        .first()
+
+    if not rulebook:
+        return jsonify({
+                'message' : 'game not found'
+            }), 404
+
     # setup llm
     memory = ConversationBufferWindowMemory(
         memory_key="chat_history",
         return_messages=True,
-        k=2
+        k=3
     )
+    # qdrant
+    qdrant = QdrantVectorStore.from_existing_collection(
+        embedding=app.embeddings,
+        collection_name=rulebook.qdrant,
+        url=app.qdrant_url,
+        api_key=os.environ["QDRANT_KEY"],
+    )
+    retriever=qdrant.as_retriever()
     qa = ConversationalRetrievalChain.from_llm(
         app.llm,
-        retriever=app.retriever,
+        retriever=retriever,
         memory=memory
     )
 
@@ -750,14 +770,16 @@ def send_message():
         if not history:
             history = ChatHistory(
                 public_id = str(uuid.uuid4()),
-                name = datetime.now(),
-                game = game,
+                # name = datetime.now().strftime("%a, %d %b %Y"),
+                name = message,
+                game = rulebook.id
             )
             user.chats.append(history)
             db.session.add(history)
             db.session.commit()
+            new_history = True
         elif history:
-            history_list = get_history(chat_id)
+            history_list = get_history(chat_id)['chats']
             input_message = ''
             output_message = ''
             for c in history_list:
@@ -798,7 +820,15 @@ def send_message():
         # commit to database
         db.session.add_all([new_user_chat, new_ai_chat])
         db.session.commit()
-    return jsonify(result['answer'])
+
+        response = {
+            "date": new_ai_chat.date.strftime("%a, %d %b %Y %X"),
+            "is_human": False,
+            "message": result['answer'],
+            "is_new": new_history,
+            "history_id": history.public_id
+        }
+    return jsonify(response)
 
 @app.route('/get_history/<chat_id>', methods =['GET'])
 def get_history(chat_id="-1"):
@@ -815,12 +845,30 @@ def get_history(chat_id="-1"):
             .all()
         for c in chats:
             result.append({
-                "date": c.date,
+                "date": c.date.strftime("%a, %d %b %Y %X"),
                 "is_human": c.is_human,
                 "message": c.message
             })
+        rulebook = Rulebook.query\
+            .filter_by(id = history.game)\
+            .first()
+
     
-    return result
+    response = {
+        "info": {
+            "game": {
+                "id": rulebook.id,
+                "name": rulebook.name,
+                "image": rulebook.image,
+                "link": rulebook.link
+            },
+            "name": history.name,
+            "public_id": history.public_id
+        },
+        "chats": result
+    }
+    
+    return response
 
 @app.route('/get_all_history/<user_id>', methods =['GET'])
 def get_all_history(user_id="-1"):
@@ -865,6 +913,19 @@ def delete_history():
     db.session.delete(history)
     db.session.commit()
     return make_response('delete history')
+
+@app.route('/get_rulebooks', methods =[ 'GET' ])
+def get_rulebooks():
+    rulebooks = Rulebook.query.all()
+    json_rulebooks = []
+    for r in rulebooks:
+        json_rulebooks.append({
+            'id': r.id,
+            'name': r.name,
+            'image': r.image,
+            'link': r.link
+        })
+    return jsonify(json_rulebooks)
 
 if __name__ == "__main__":
     # setting debug to True enables hot reload
@@ -911,7 +972,7 @@ if __name__ == "__main__":
     #     test_history = ChatHistory(
     #         public_id = str(uuid.uuid4()),
     #         name = "test",
-    #         game = 0,
+    #         game = 1
     #     )
     #     admin.chats = [test_history]
     #     test_chat1 = ChatMessage(
@@ -928,10 +989,42 @@ if __name__ == "__main__":
     #     )
     #     test_history.chats = [test_chat1, test_chat2]
 
+    #     rule1 = Rulebook(
+    #         name = 'Brass: Birmingham (2018)',
+    #         qdrant = 'brass_birmingham',
+    #         image = 'https://cf.geekdo-images.com/x3zxjr-Vw5iU4yDPg70Jgw__original/img/FpyxH41Y6_ROoePAilPNEhXnzO8=/0x0/filters:format(jpeg)/pic3490053.jpg',
+    #         link = 'https://drive.google.com/file/d/1XOjc-n02L9pej9XVij_CfQuZaKWaq1ho/view?usp=drive_link'
+    #     )
+    #     rule2 = Rulebook(
+    #         name = 'Pandemic Legacy: Season 1 (2015)',
+    #         qdrant = 'pandemic_legacy_season_1',
+    #         image = 'https://cf.geekdo-images.com/-Qer2BBPG7qGGDu6KcVDIw__original/img/PlzAH7swN1nsFxOXbfUvE3TkE5w=/0x0/filters:format(png)/pic2452831.png',
+    #         link = 'https://drive.google.com/file/d/11vzFn7tXplAJ9AOtDWXCm2jq3v3UKrKD/view?usp=drive_link'
+    #     )
+    #     rule3 = Rulebook(
+    #         name = 'Splendor (2014)',
+    #         qdrant = 'splendor',
+    #         image = 'https://cf.geekdo-images.com/rwOMxx4q5yuElIvo-1-OFw__original/img/Y2tUGY2nPTGd_epJYKQXPkQD8AM=/0x0/filters:format(jpeg)/pic1904079.jpg',
+    #         link = 'https://drive.google.com/file/d/1Qyv0laqgdFFp5Qb4Ds8e0Fx5xjV6zu9c/view?usp=drive_link'
+    #     )
+    #     rule4 = Rulebook(
+    #         name = 'Twilight Imperium: Fourth Edition (2017)',
+    #         qdrant = 'twilight_imperium',
+    #         image = 'https://cf.geekdo-images.com/_Ppn5lssO5OaildSE-FgFA__original/img/kVpZ0Maa_LeQGWxOqsYKP3N4KUY=/0x0/filters:format(jpeg)/pic3727516.jpg',
+    #         link = 'https://drive.google.com/file/d/1ag2VVQOJ72km4OpQ-Hd497Tty2WVfTqT/view?usp=drive_link'
+    #     )
+    #     rule5 = Rulebook(
+    #         name = 'Terraforming Mars (2016)',
+    #         qdrant = 'terraforming',
+    #         image = 'https://cf.geekdo-images.com/wg9oOLcsKvDesSUdZQ4rxw__original/img/thIqWDnH9utKuoKVEUqveDixprI=/0x0/filters:format(jpeg)/pic3536616.jpg',
+    #         link = 'https://drive.google.com/file/d/1wu5j4potARoal3RBOvHT62NgBV1F4j6u/view?usp=drive_link'
+    #     )
+
     #     # insert user
     #     db.session.add(admin)
     #     db.session.add_all([test_collection, sec, thd, item1, item2, item3])
     #     db.session.add_all([test_history, test_chat1, test_chat2])
+    #     db.session.add_all([rule1, rule2, rule3, rule4, rule5])
     #     db.session.commit()
 
     app.run(debug = True)
