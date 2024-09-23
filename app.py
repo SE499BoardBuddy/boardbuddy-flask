@@ -47,9 +47,9 @@ app.es_client = Elasticsearch("https://localhost:9200", basic_auth=("elastic", o
 app.df = pd.read_parquet('bgg_games_info_cleaned.parquet.gzip')
 
 # embedding
-app.embeddings = OllamaEmbeddings(model='nomic-embed-text') 
+app.embeddings = OllamaEmbeddings(model='nomic-embed-text', base_url=os.environ.get('EMBEDDED_URL')) 
 # qdrant
-app.qdrant_url = "https://183e03de-cba4-4c31-9a62-be25dc87e60e.europe-west3-0.gcp.cloud.qdrant.io"
+app.qdrant_url = os.environ.get('QDRANT_URL')
 # llm
 app.llm = GoogleGenerativeAI(model="gemini-1.5-flash", google_api_key=os.environ["GOOGLE_API_KEY_GEN"])
 
@@ -701,11 +701,11 @@ def random_pick():
             'min_age': content["_source"]['age']
         })
     
-    pick_filter_min_age(return_list, min_age)
-    pick_filter_min_playtime(return_list, min_playtime)
-    pick_filter_max_playtime(return_list, max_playtime)
-    pick_filter_min_players(return_list, min_players)
-    pick_filter_max_players(return_list, max_players)
+    return_list = pick_filter_min_age(return_list, min_age)
+    return_list = pick_filter_min_playtime(return_list, min_playtime)
+    return_list = pick_filter_max_playtime(return_list, max_playtime)
+    return_list = pick_filter_min_players(return_list, min_players)
+    return_list = pick_filter_max_players(return_list, max_players)
 
     if len(return_list) != 0:
         response = [random.choice(return_list)]
@@ -852,7 +852,10 @@ def get_history(chat_id="-1"):
         rulebook = Rulebook.query\
             .filter_by(id = history.game)\
             .first()
-
+    else:
+        return jsonify({
+                'message' : 'history not found'
+            }), 404
     
     response = {
         "info": {
@@ -889,6 +892,10 @@ def get_all_history(user_id="-1"):
                 "game": h.game,
                 "public_id": h.public_id
             })
+    else:
+        return jsonify({
+                'message' : 'user not found'
+            }), 404
     
     return result
 
@@ -1019,12 +1026,18 @@ if __name__ == "__main__":
     #         image = 'https://cf.geekdo-images.com/wg9oOLcsKvDesSUdZQ4rxw__original/img/thIqWDnH9utKuoKVEUqveDixprI=/0x0/filters:format(jpeg)/pic3536616.jpg',
     #         link = 'https://drive.google.com/file/d/1wu5j4potARoal3RBOvHT62NgBV1F4j6u/view?usp=drive_link'
     #     )
+    #     rule6 = Rulebook(
+    #         name = 'UNO',
+    #         qdrant = 'uno',
+    #         image = 'https://cf.geekdo-images.com/-DHiHBBSnvaLu0Do8CIykQ__imagepagezoom/img/YLahd-LQ4pAFDPZ7GvbDSjZYy6g=/fit-in/1200x900/filters:no_upscale():strip_icc()/pic8204165.jpg',
+    #         link = 'https://drive.google.com/file/d/18XfM5Z10PU7-YkO-5Z1RHTnlNjY9c19l/view?usp=drive_link'
+    #     )
 
     #     # insert user
     #     db.session.add(admin)
     #     db.session.add_all([test_collection, sec, thd, item1, item2, item3])
     #     db.session.add_all([test_history, test_chat1, test_chat2])
-    #     db.session.add_all([rule1, rule2, rule3, rule4, rule5])
+    #     db.session.add_all([rule1, rule2, rule3, rule4, rule5, rule6])
     #     db.session.commit()
 
     app.run(debug = True)
