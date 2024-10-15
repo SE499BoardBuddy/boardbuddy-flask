@@ -1,7 +1,7 @@
 import unittest
 
-from build_filter import build_filter_min_age, build_filter_min_players, build_filter_max_players, build_filter_min_playtime
-from build_filter import build_filter_max_playtime, build_filter_min_year, build_filter_max_year, build_filter_match
+from functions.build_filter import build_filter_min_age, build_filter_min_players, build_filter_max_players, build_filter_min_playtime
+from functions.build_filter import build_filter_max_playtime, build_filter_min_year, build_filter_max_year, build_filter_match
 
 class testBuildFilter(unittest.TestCase):
     # min_age
@@ -262,7 +262,7 @@ class testBuildFilter(unittest.TestCase):
             {'match': {'boardgame_subdomain': 'test'}}
         ])
 
-from pick_filter import pick_filter_min_age, pick_filter_min_players, pick_filter_max_players, pick_filter_min_playtime, pick_filter_max_playtime
+from functions.pick_filter import pick_filter_min_age, pick_filter_min_players, pick_filter_max_players, pick_filter_min_playtime, pick_filter_max_playtime
 
 pick_list = [
             {
@@ -474,7 +474,7 @@ class testPickFilter(unittest.TestCase):
             },
         ])
     
-    def test_pick_filter_max_players_string(self):
+    def test_pick_filter_max_players_zero(self):
         max_players = 0
         self.assertEqual(pick_filter_max_players(pick_list, max_players), [
             {
